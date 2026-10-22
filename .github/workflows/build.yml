@@ -1,0 +1,154 @@
+name: Build LibWrt for Redmi AX6
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'configs/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: qualcommax/ipq807x redmi_ax6-stock
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Show runner specs
+        run: |
+          echo "CPU: $(nproc)"; free -h; df -h /
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Show disk after cleanup
+        run: df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev rsync unzip zlib1g-dev file \
+            wget cpio python3 python3-setuptools swig time xsltproc libelf-dev \
+            ecj fastjar java-propose-classpath subversion device-tree-compiler \
+            ccache upx-ucl
+
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone LibWrt
+        run: |
+          git clone --depth 1 --single-branch -b 25.12-nss \
+            https://github.com/LiBwrt/LibWrt.git openwrt
+          cd openwrt
+          git log -1 --format='HEAD %H %ad %s'
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply config
+        run: |
+          cp configs/ax6.config openwrt/.config
+          cd openwrt
+          make defconfig
+          echo "===== 关键符号核对 ====="
+          for s in \
+            CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_redmi_ax6-stock \
+            CONFIG_PACKAGE_kmod-dummy \
+            CONFIG_PACKAGE_kmod-nft-socket \
+            CONFIG_PACKAGE_kmod-sched-bpf \
+            CONFIG_PACKAGE_kmod-sched-core \
+            CONFIG_PACKAGE_kmod-wireguard \
+            CONFIG_PACKAGE_zram-swap
+          do
+            if grep -qx "$s=y" .config; then echo "OK   $s"; else echo "MISS $s"; fi
+          done
+          echo "===== 设备 profile ====="
+          grep -E '^CONFIG_TARGET_(PROFILE|DEVICE_qualcommax)' .config
+
+      - name: Verify device symbol is valid
+        run: |
+          cd openwrt
+          if ! grep -qx 'CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_redmi_ax6-stock=y' .config; then
+            echo "::error::设备符号未被识别，检查 configs/ax6.config"
+            exit 1
+          fi
+
+      - name: Download package sources
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+
+      - name: Build firmware
+        run: |
+          cd openwrt
+          make -j$(($(nproc)+1)) || make -j1 V=s
+
+      - name: Collect outputs
+        if: always()
+        run: |
+          cd openwrt
+          mkdir -p ../out
+          find bin/targets/qualcommax/ipq807x -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' -o -name 'sha256sums' \) \
+            -exec cp {} ../out/ \; 2>/dev/null || true
+          cp .config ../out/ax6.build.config 2>/dev/null || true
+          echo "===== 产物 ====="
+          ls -lh ../out/ || true
+
+      - name: Verify built image metadata
+        if: always()
+        run: |
+          cd out 2>/dev/null || exit 0
+          IMG=$(ls *sysupgrade.bin 2>/dev/null | head -1)
+          if [ -n "$IMG" ]; then
+            echo "镜像: $IMG"
+            echo "===== supported_devices ====="
+            strings -a "$IMG" | grep -o '"supported_devices":\[[^]]*\]' | head -2
+            echo "===== 体积 ====="
+            ls -lh "$IMG"
+            if strings -a "$IMG" | grep -q 'redmi,ax6-stock'; then
+              echo "::notice::元数据包含 redmi,ax6-stock，可刷"
+            else
+              echo "::warning::元数据未包含 redmi,ax6-stock，请勿刷入"
+            fi
+          else
+            echo "::warning::未找到 sysupgrade.bin"
+          fi
+
+      - name: Verify kernel modules inside image
+        if: always()
+        run: |
+          cd out 2>/dev/null || exit 0
+          IMG=$(ls *sysupgrade.bin 2>/dev/null | head -1)
+          [ -z "$IMG" ] && exit 0
+          echo "===== 镜像内 kmod 关键字命中 ====="
+          for m in dummy nft_socket cls_bpf act_bpf sch_ingress wireguard; do
+            c=$(strings -a "$IMG" | grep -c "$m" || true)
+            echo "  $m -> $c"
+          done
+
+      - name: Upload firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libwrt-ax6-stock-${{ github.run_number }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
