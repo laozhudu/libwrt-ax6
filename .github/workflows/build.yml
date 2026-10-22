@@ -76,7 +76,7 @@ jobs:
             CONFIG_PACKAGE_kmod-sched-bpf \
             CONFIG_PACKAGE_kmod-sched-core \
             CONFIG_PACKAGE_kmod-veth \
-            CONFIG_PACKAGE_kmod-tproxy \
+            CONFIG_PACKAGE_kmod-nft-tproxy \
             CONFIG_PACKAGE_kmod-tun \
             CONFIG_PACKAGE_kmod-wireguard \
             CONFIG_PACKAGE_kmod-tcp-bbr \
